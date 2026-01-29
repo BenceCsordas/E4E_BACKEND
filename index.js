@@ -10,6 +10,6 @@ app.use(express.json())
 const port = 8000
 
 console.log(port)
-
+console.log("halo")
 
 app.listen(port, ()=> console.log("Server is listening on port: " + port))
