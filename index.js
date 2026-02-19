@@ -285,7 +285,39 @@ app.post("/events", requireAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+//ensure
+app.post("/users/me/ensure", requireAuth, async (req, res) => {
+  try {
+    const { uid, email, name } = req.user;
 
+    const ref = db.collection(USERS).doc(uid);
+    const snap = await ref.get();
+
+    const displayName =
+      (typeof req.body?.name === "string" && req.body.name.trim()) ||
+      (typeof name === "string" && name.trim()) ||
+      (email ? String(email).split("@")[0] : "Unknown");
+
+    if (!snap.exists) {
+      await ref.set({
+        name: displayName,
+        email: email || null,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return res.status(201).json({ ok: true, created: true });
+    }
+
+    await ref.update({
+      name: displayName,
+      email: email || null,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.status(200).json({ ok: true, created: false });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
 // esemény módosítás (csak saját) – itt már kép is mehet
 app.put("/events/:id", requireAuth, async (req, res) => {
   try {
