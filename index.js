@@ -6,10 +6,8 @@ import dotenv from "dotenv";
 import multer from "multer";
 import axios from "axios";
 
-// ---- .env ----
 dotenv.config();
 
-// ---- Firebase Admin init (service account) ----
 const serviceAccount = JSON.parse(
   fs.readFileSync(new URL("./serviceAccountKey.json", import.meta.url), "utf8")
 );
@@ -28,11 +26,10 @@ app.use(express.json());
 const port = 8000;
 const USERS = "users";
 const EVENTS = "events";
+const REGISTRATIONS = "registrations"; // ✅ külön top-level collection
 
-// ---- Multer (memory) for multipart upload ----
 const upload = multer({ storage: multer.memoryStorage() });
 
-// --- helper: basic validation ---
 function isNonEmptyString(x) {
   return typeof x === "string" && x.trim().length > 0;
 }
@@ -40,11 +37,7 @@ function isNonEmptyString(x) {
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-
-  if (!token) {
-    return res.status(401).json({ error: "Missing Authorization Bearer token" });
-  }
-
+  if (!token) return res.status(401).json({ error: "Missing Authorization Bearer token" });
   try {
     req.user = await auth.verifyIdToken(token);
     return next();
@@ -53,8 +46,8 @@ async function requireAuth(req, res, next) {
   }
 }
 
-// -------------------- IMAGE (imgbb via backend) --------------------
-// POST /api/uploadImage  (multipart/form-data, field: image)
+// -------------------- IMAGE --------------------
+
 app.post("/api/uploadImage", requireAuth, upload.single("image"), async (req, res) => {
   try {
     const apiKey = process.env.IMGBB_API_KEY;
@@ -62,7 +55,6 @@ app.post("/api/uploadImage", requireAuth, upload.single("image"), async (req, re
     if (!req.file) return res.status(400).json({ error: "Missing image file (field name: image)" });
 
     const base64 = req.file.buffer.toString("base64");
-
     const params = new URLSearchParams();
     params.append("key", apiKey);
     params.append("image", base64);
@@ -75,25 +67,17 @@ app.post("/api/uploadImage", requireAuth, upload.single("image"), async (req, re
     const data = response.data?.data;
     if (!data?.url) return res.status(500).json({ error: "imgbb upload failed" });
 
-    res.status(200).json({
-      url: data.url,
-      delete_url: data.delete_url || null,
-    });
+    res.status(200).json({ url: data.url, delete_url: data.delete_url || null });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// POST /api/deleteImage  { delete_url }
 app.post("/api/deleteImage", requireAuth, async (req, res) => {
   try {
     const { delete_url } = req.body;
-    if (!isNonEmptyString(delete_url)) {
-      return res.status(400).json({ error: "delete_url is required" });
-    }
-
+    if (!isNonEmptyString(delete_url)) return res.status(400).json({ error: "delete_url is required" });
     await axios.get(delete_url.trim());
-
     res.status(200).json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -105,10 +89,8 @@ app.post("/api/deleteImage", requireAuth, async (req, res) => {
 app.get("/users", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
-
     const snapshot = await db.collection(USERS).orderBy("name").limit(limit).get();
     const users = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-
     res.status(200).json({ count: users.length, users, limit });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -119,9 +101,7 @@ app.get("/users/me", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
     const doc = await db.collection(USERS).doc(uid).get();
-
     if (!doc.exists) return res.status(404).json({ error: "User profile not found" });
-
     res.status(200).json({ id: doc.id, ...doc.data() });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -131,34 +111,19 @@ app.get("/users/me", requireAuth, async (req, res) => {
 app.post("/users/register", async (req, res) => {
   try {
     const { name, email, password } = req.body;
+    if (!isNonEmptyString(name)) return res.status(400).json({ error: "name is required" });
+    if (!isNonEmptyString(email) || !email.includes("@")) return res.status(400).json({ error: "valid email is required" });
+    if (!isNonEmptyString(password) || password.length < 6) return res.status(400).json({ error: "password must be at least 6 characters" });
 
-    if (!isNonEmptyString(name)) {
-      return res.status(400).json({ error: "name is required (non-empty string)" });
-    }
-    if (!isNonEmptyString(email) || !email.includes("@")) {
-      return res.status(400).json({ error: "valid email is required" });
-    }
-    if (!isNonEmptyString(password) || password.length < 6) {
-      return res.status(400).json({ error: "password must be at least 6 characters" });
-    }
-
-    const userRecord = await auth.createUser({
-      email: email.trim(),
-      password,
-      displayName: name.trim(),
-    });
-
+    const userRecord = await auth.createUser({ email: email.trim(), password, displayName: name.trim() });
     await db.collection(USERS).doc(userRecord.uid).set({
       name: name.trim(),
       email: email.trim(),
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-
     res.status(201).json({ ok: true, uid: userRecord.uid });
   } catch (e) {
-    if (e?.code === "auth/email-already-exists") {
-      return res.status(409).json({ error: "Email already exists" });
-    }
+    if (e?.code === "auth/email-already-exists") return res.status(409).json({ error: "Email already exists" });
     res.status(500).json({ error: e.message });
   }
 });
@@ -167,36 +132,43 @@ app.put("/users/me", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
     const { name } = req.body;
-
-    if (!isNonEmptyString(name)) {
-      return res.status(400).json({ error: "name is required (non-empty string)" });
-    }
-
-    await db.collection(USERS).doc(uid).update({
-      name: name.trim(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
+    if (!isNonEmptyString(name)) return res.status(400).json({ error: "name is required" });
+    await db.collection(USERS).doc(uid).update({ name: name.trim(), updatedAt: admin.firestore.FieldValue.serverTimestamp() });
     await auth.updateUser(uid, { displayName: name.trim() });
-
     res.status(200).json({ ok: true, msg: "Sikeres módosítás" });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
+app.post("/users/me/ensure", requireAuth, async (req, res) => {
+  try {
+    const { uid, email, name } = req.user;
+    const ref = db.collection(USERS).doc(uid);
+    const snap = await ref.get();
+    const displayName =
+      (typeof req.body?.name === "string" && req.body.name.trim()) ||
+      (typeof name === "string" && name.trim()) ||
+      (email ? String(email).split("@")[0] : "Unknown");
+
+    if (!snap.exists) {
+      await ref.set({ name: displayName, email: email || null, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+      return res.status(201).json({ ok: true, created: true });
+    }
+    await ref.update({ name: displayName, email: email || null, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return res.status(200).json({ ok: true, created: false });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // -------------------- EVENTS --------------------
+// ⚠️ Fix útvonalak MINDIG az /events/:id ELŐTT!
 
 app.get("/events", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
-
-    const snapshot = await db
-      .collection(EVENTS)
-      .orderBy("createdAt", "desc")
-      .limit(limit)
-      .get();
-
+    const snapshot = await db.collection(EVENTS).orderBy("createdAt", "desc").limit(limit).get();
     const events = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
     res.status(200).json({ count: events.length, events, limit });
   } catch (e) {
@@ -208,14 +180,7 @@ app.get("/events/mine", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
     const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
-
-    const snapshot = await db
-      .collection(EVENTS)
-      .where("ownerUid", "==", uid)
-      .orderBy("createdAt", "desc")
-      .limit(limit)
-      .get();
-
+    const snapshot = await db.collection(EVENTS).where("ownerUid", "==", uid).orderBy("createdAt", "desc").limit(limit).get();
     const events = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
     res.status(200).json({ count: events.length, events, limit });
   } catch (e) {
@@ -223,9 +188,57 @@ app.get("/events/mine", requireAuth, async (req, res) => {
   }
 });
 
+// ✅ Saját regisztrált események – a top-level registrations collection alapján
+app.get("/events/registered", requireAuth, async (req, res) => {
+  try {
+    const { uid } = req.user;
+
+    // Megkeressük az összes regisztrációt ahol uid == saját uid
+    const regSnap = await db.collection(REGISTRATIONS).where("uid", "==", uid).get();
+    const eventIds = regSnap.docs.map((doc) => doc.data().eventId).filter(Boolean);
+
+    if (eventIds.length === 0) {
+      return res.status(200).json({ count: 0, events: [] });
+    }
+
+    // Firestore "in" max 30 elemet tud egyszerre
+    const chunks = [];
+    for (let i = 0; i < eventIds.length; i += 30) {
+      chunks.push(eventIds.slice(i, i + 30));
+    }
+
+    const events = [];
+    await Promise.all(
+      chunks.map(async (chunk) => {
+        const snap = await db.collection(EVENTS).where(admin.firestore.FieldPath.documentId(), "in", chunk).get();
+        snap.docs.forEach((doc) => events.push({ id: doc.id, ...doc.data() }));
+      })
+    );
+
+    res.status(200).json({ count: events.length, events });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ✅ Minden esemény jelentkezőinek száma – a top-level registrations collection alapján
+app.get("/events/registration-counts", async (req, res) => {
+  try {
+    const regSnap = await db.collection(REGISTRATIONS).get();
+    const counts = {};
+    regSnap.docs.forEach((doc) => {
+      const { eventId } = doc.data();
+      if (eventId) counts[eventId] = (counts[eventId] || 0) + 1;
+    });
+    res.status(200).json({ counts });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // -------------------- REGISTRATIONS --------------------
 
-// Jelentkezés eseményre
+// ✅ Jelentkezés – top-level registrations collection-be ment
 app.post("/events/:id/register", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
@@ -234,9 +247,17 @@ app.post("/events/:id/register", requireAuth, async (req, res) => {
     const eventDoc = await db.collection(EVENTS).doc(id).get();
     if (!eventDoc.exists) return res.status(404).json({ error: "Esemény nem található" });
 
-    const regRef = db.collection(EVENTS).doc(id).collection("registrations").doc(uid);
-    await regRef.set({
+    const userDoc = await db.collection(USERS).doc(uid).get();
+    const userData = userDoc.exists ? userDoc.data() : null;
+
+    // Egyedi doc ID: uid_eventId hogy ne legyen duplikált regisztráció
+    const regId = `${uid}_${id}`;
+    await db.collection(REGISTRATIONS).doc(regId).set({
       uid,
+      eventId: id,
+      eventTitle: eventDoc.data().title || null,
+      userName: userData?.name || req.user?.email?.split("@")[0] || "Unknown",
+      userEmail: userData?.email || req.user?.email || null,
       registeredAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -246,13 +267,14 @@ app.post("/events/:id/register", requireAuth, async (req, res) => {
   }
 });
 
-// Leiratkozás eseményről
+// ✅ Leiratkozás – top-level registrations collection-ből töröl
 app.delete("/events/:id/register", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
     const { id } = req.params;
 
-    await db.collection(EVENTS).doc(id).collection("registrations").doc(uid).delete();
+    const regId = `${uid}_${id}`;
+    await db.collection(REGISTRATIONS).doc(regId).delete();
 
     res.status(200).json({ ok: true, msg: "Sikeres leiratkozás" });
   } catch (e) {
@@ -260,61 +282,25 @@ app.delete("/events/:id/register", requireAuth, async (req, res) => {
   }
 });
 
-// Saját regisztrált események lekérése
-app.get("/events/registered", requireAuth, async (req, res) => {
-  try {
-    const { uid } = req.user;
-    const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
-
-    // Megkeressük azokat az eseményeket ahol az uid szerepel a registrations subcollectionben
-    const eventsSnap = await db.collection(EVENTS).limit(200).get();
-
-    const registeredEvents = [];
-
-    const checks = eventsSnap.docs.map(async (doc) => {
-      const regDoc = await db
-        .collection(EVENTS)
-        .doc(doc.id)
-        .collection("registrations")
-        .doc(uid)
-        .get();
-
-      if (regDoc.exists) {
-        registeredEvents.push({ id: doc.id, ...doc.data() });
-      }
-    });
-
-    await Promise.all(checks);
-
-    res.status(200).json({ count: registeredEvents.length, events: registeredEvents, limit });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Egy esemény jelentkezői
-app.get("/events/:id/registrations", requireAuth, async (req, res) => {
+// ✅ Egy esemény összes jelentkezője
+app.get("/events/:id/registrations", async (req, res) => {
   try {
     const { id } = req.params;
-
-    const snap = await db.collection(EVENTS).doc(id).collection("registrations").get();
+    const snap = await db.collection(REGISTRATIONS).where("eventId", "==", id).get();
     const registrations = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-
     res.status(200).json({ count: registrations.length, registrations });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// -------------------- EVENTS CRUD (ezek KÖTELEZŐEN a /events/:id előtt legyenek!) --------------------
+// -------------------- EVENTS CRUD --------------------
 
 app.get("/events/:id", async (req, res) => {
   try {
     const { id } = req.params;
-
     const doc = await db.collection(EVENTS).doc(id).get();
     if (!doc.exists) return res.status(404).json({ error: "A megadott esemény nem létezik" });
-
     res.status(200).json({ id: doc.id, ...doc.data() });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -325,42 +311,27 @@ app.post("/events", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
     const { title, location, description, imageUrl, imageDeleteUrl, images } = req.body;
-
-    if (!isNonEmptyString(title)) {
-      return res.status(400).json({ error: "title is required" });
-    }
+    if (!isNonEmptyString(title)) return res.status(400).json({ error: "title is required" });
 
     const userDoc = await db.collection(USERS).doc(uid).get();
     const userData = userDoc.exists ? userDoc.data() : null;
-
     const ownerName =
       (userData?.name && String(userData.name).trim()) ||
       (req.user?.name && String(req.user.name).trim()) ||
       (req.user?.email ? String(req.user.email).split("@")[0] : "Unknown");
-
     const ownerEmail = userData?.email || req.user?.email || null;
-
-    // Képek kezelése: ha images[] tömb jön, azt mentjük, különben a régi imageUrl mezőt
-    const imagesData = Array.isArray(images) && images.length > 0
-      ? images
-      : [];
+    const imagesData = Array.isArray(images) && images.length > 0 ? images : [];
 
     const docRef = await db.collection(EVENTS).add({
       title: title.trim(),
       location: isNonEmptyString(location) ? location.trim() : null,
       description: isNonEmptyString(description) ? description.trim() : null,
-
-      // Visszafelé kompatibilitás: régi imageUrl mező
       imageUrl: isNonEmptyString(imageUrl) ? imageUrl.trim() : (imagesData[0]?.url || null),
       imageDeleteUrl: isNonEmptyString(imageDeleteUrl) ? imageDeleteUrl.trim() : (imagesData[0]?.delete_url || null),
-
-      // Új: képek tömbje
       images: imagesData,
-
       ownerUid: uid,
       ownerName,
       ownerEmail,
-
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -370,71 +341,26 @@ app.post("/events", requireAuth, async (req, res) => {
   }
 });
 
-app.post("/users/me/ensure", requireAuth, async (req, res) => {
-  try {
-    const { uid, email, name } = req.user;
-
-    const ref = db.collection(USERS).doc(uid);
-    const snap = await ref.get();
-
-    const displayName =
-      (typeof req.body?.name === "string" && req.body.name.trim()) ||
-      (typeof name === "string" && name.trim()) ||
-      (email ? String(email).split("@")[0] : "Unknown");
-
-    if (!snap.exists) {
-      await ref.set({
-        name: displayName,
-        email: email || null,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-      return res.status(201).json({ ok: true, created: true });
-    }
-
-    await ref.update({
-      name: displayName,
-      email: email || null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return res.status(200).json({ ok: true, created: false });
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
-  }
-});
-
-// ✅ JAVÍTOTT PUT /events/:id - most már images[] és description is mentődik
 app.put("/events/:id", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
     const { id } = req.params;
     const { title, location, description, images, imageUrl, imageDeleteUrl } = req.body;
-
-    if (!isNonEmptyString(title)) {
-      return res.status(400).json({ error: "Hibás kérés: title kötelező" });
-    }
+    if (!isNonEmptyString(title)) return res.status(400).json({ error: "Hibás kérés: title kötelező" });
 
     const ref = db.collection(EVENTS).doc(id);
     const docSnap = await ref.get();
-
     if (!docSnap.exists) return res.status(404).json({ error: "A megadott esemény nem létezik" });
     if (docSnap.data().ownerUid !== uid) return res.status(403).json({ error: "Nem a te eseményed" });
 
-    // Képek kezelése
     const imagesData = Array.isArray(images) ? images : [];
-
     await ref.update({
       title: title.trim(),
       location: isNonEmptyString(location) ? location.trim() : null,
       description: isNonEmptyString(description) ? description.trim() : null,
-
-      // Visszafelé kompatibilitás
       imageUrl: isNonEmptyString(imageUrl) ? imageUrl.trim() : (imagesData[0]?.url || null),
       imageDeleteUrl: isNonEmptyString(imageDeleteUrl) ? imageDeleteUrl.trim() : (imagesData[0]?.delete_url || null),
-
-      // Új: képek tömbje
       images: imagesData,
-
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -451,9 +377,14 @@ app.delete("/events/:id", requireAuth, async (req, res) => {
 
     const ref = db.collection(EVENTS).doc(id);
     const docSnap = await ref.get();
-
     if (!docSnap.exists) return res.status(404).json({ error: "A megadott esemény nem létezik" });
     if (docSnap.data().ownerUid !== uid) return res.status(403).json({ error: "Nem a te eseményed" });
+
+    // Esemény törlésénél a hozzá tartozó regisztrációkat is töröljük
+    const regSnap = await db.collection(REGISTRATIONS).where("eventId", "==", id).get();
+    const batch = db.batch();
+    regSnap.docs.forEach((doc) => batch.delete(doc.ref));
+    await batch.commit();
 
     await ref.delete();
     res.status(200).json({ ok: true, msg: "Sikeres törlés" });
