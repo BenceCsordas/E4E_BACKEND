@@ -9,22 +9,33 @@ import axios from "axios";
 dotenv.config();
 
 let serviceAccount;
-if (process.env.SERVICE_ACCOUNT_KEY) {
-  const rawKey = process.env.SERVICE_ACCOUNT_KEY;
-  // Kicseréljük a szöveges \n karaktereket valódi sortörésre
-  serviceAccount = JSON.parse(rawKey);
-  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-}
-else {
-  serviceAccount = JSON.parse(
-    fs.readFileSync(new URL("./serviceAccountKey.json", import.meta.url), "utf8")
-  );
+
+try {
+  if (process.env.SERVICE_ACCOUNT_KEY) {
+    const rawKey = process.env.SERVICE_ACCOUNT_KEY.trim();
+    
+    serviceAccount = JSON.parse(rawKey);
+    
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
+  } else {
+    const keyPath = new URL("./serviceAccountKey.json", import.meta.url);
+    serviceAccount = JSON.parse(fs.readFileSync(keyPath, "utf8"));
+  }
+} catch (error) {
+  console.error("KRITIKUS: Firebase kulcs hiba:", error.message);
 }
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
+if (!admin.apps.length && serviceAccount) {
+  try {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    console.log("Firebase sikeresen inicializálva!");
+  } catch (initError) {
+    console.error("Firebase init hiba:", initError.message);
+  }
 }
 
 const db = admin.firestore();
