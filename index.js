@@ -17,15 +17,27 @@ if (process.env.SERVICE_ACCOUNT_KEY) {
   );
 }
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
 
 const db = admin.firestore();
 const auth = admin.auth();
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+  origin: [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://te-oldalad.netlify.app" 
+  ],
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
+}));
+
 app.use(express.json());
 
 const port = 8000;
@@ -388,4 +400,8 @@ app.delete("/events/:id", requireAuth, async (req, res) => {
   }
 });
 
-app.listen(port, () => console.log("Server is listening on port: " + port));
+if (process.env.NODE_ENV !== "production") {
+  app.listen(port, () => console.log("Server is listening on port: " + port));
+}
+
+export default app;
