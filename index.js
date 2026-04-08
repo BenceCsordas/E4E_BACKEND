@@ -8,9 +8,14 @@ import axios from "axios";
 
 dotenv.config();
 
-const serviceAccount = JSON.parse(
-  fs.readFileSync(new URL("./serviceAccountKey.json", import.meta.url), "utf8")
-);
+let serviceAccount;
+if (process.env.SERVICE_ACCOUNT_KEY) {
+  serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
+} else {
+  serviceAccount = JSON.parse(
+    fs.readFileSync(new URL("./serviceAccountKey.json", import.meta.url), "utf8")
+  );
+}
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -26,7 +31,7 @@ app.use(express.json());
 const port = 8000;
 const USERS = "users";
 const EVENTS = "events";
-const REGISTRATIONS = "registrations"; // ✅ külön top-level collection
+const REGISTRATIONS = "registrations";
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -163,7 +168,6 @@ app.post("/users/me/ensure", requireAuth, async (req, res) => {
 });
 
 // -------------------- EVENTS --------------------
-// ⚠️ Fix útvonalak MINDIG az /events/:id ELŐTT!
 
 app.get("/events", async (req, res) => {
   try {
@@ -188,12 +192,10 @@ app.get("/events/mine", requireAuth, async (req, res) => {
   }
 });
 
-// ✅ Saját regisztrált események – a top-level registrations collection alapján
 app.get("/events/registered", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
 
-    // Megkeressük az összes regisztrációt ahol uid == saját uid
     const regSnap = await db.collection(REGISTRATIONS).where("uid", "==", uid).get();
     const eventIds = regSnap.docs.map((doc) => doc.data().eventId).filter(Boolean);
 
@@ -201,7 +203,6 @@ app.get("/events/registered", requireAuth, async (req, res) => {
       return res.status(200).json({ count: 0, events: [] });
     }
 
-    // Firestore "in" max 30 elemet tud egyszerre
     const chunks = [];
     for (let i = 0; i < eventIds.length; i += 30) {
       chunks.push(eventIds.slice(i, i + 30));
@@ -221,7 +222,6 @@ app.get("/events/registered", requireAuth, async (req, res) => {
   }
 });
 
-// ✅ Minden esemény jelentkezőinek száma – a top-level registrations collection alapján
 app.get("/events/registration-counts", async (req, res) => {
   try {
     const regSnap = await db.collection(REGISTRATIONS).get();
@@ -238,7 +238,6 @@ app.get("/events/registration-counts", async (req, res) => {
 
 // -------------------- REGISTRATIONS --------------------
 
-// ✅ Jelentkezés – top-level registrations collection-be ment
 app.post("/events/:id/register", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
@@ -250,7 +249,6 @@ app.post("/events/:id/register", requireAuth, async (req, res) => {
     const userDoc = await db.collection(USERS).doc(uid).get();
     const userData = userDoc.exists ? userDoc.data() : null;
 
-    // Egyedi doc ID: uid_eventId hogy ne legyen duplikált regisztráció
     const regId = `${uid}_${id}`;
     await db.collection(REGISTRATIONS).doc(regId).set({
       uid,
@@ -267,7 +265,6 @@ app.post("/events/:id/register", requireAuth, async (req, res) => {
   }
 });
 
-// ✅ Leiratkozás – top-level registrations collection-ből töröl
 app.delete("/events/:id/register", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
@@ -282,7 +279,6 @@ app.delete("/events/:id/register", requireAuth, async (req, res) => {
   }
 });
 
-// ✅ Egy esemény összes jelentkezője
 app.get("/events/:id/registrations", async (req, res) => {
   try {
     const { id } = req.params;
@@ -380,7 +376,6 @@ app.delete("/events/:id", requireAuth, async (req, res) => {
     if (!docSnap.exists) return res.status(404).json({ error: "A megadott esemény nem létezik" });
     if (docSnap.data().ownerUid !== uid) return res.status(403).json({ error: "Nem a te eseményed" });
 
-    // Esemény törlésénél a hozzá tartozó regisztrációkat is töröljük
     const regSnap = await db.collection(REGISTRATIONS).where("eventId", "==", id).get();
     const batch = db.batch();
     regSnap.docs.forEach((doc) => batch.delete(doc.ref));
