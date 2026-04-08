@@ -10,8 +10,12 @@ dotenv.config();
 
 let serviceAccount;
 if (process.env.SERVICE_ACCOUNT_KEY) {
-  serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
-} else {
+  const rawKey = process.env.SERVICE_ACCOUNT_KEY;
+  // Kicseréljük a szöveges \n karaktereket valódi sortörésre
+  serviceAccount = JSON.parse(rawKey);
+  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+}
+else {
   serviceAccount = JSON.parse(
     fs.readFileSync(new URL("./serviceAccountKey.json", import.meta.url), "utf8")
   );
