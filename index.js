@@ -62,8 +62,21 @@ const REGISTRATIONS = "registrations";
 
 const upload = multer({ storage: multer.memoryStorage() });
 
+// yyyy.mm.dd
+const dateRegex = /^\d{4}\.\d{2}\.\d{2}$/;
+// hh:mm
+const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
 function isNonEmptyString(x) {
   return typeof x === "string" && x.trim().length > 0;
+}
+
+function isValidDate(date) {
+  return date !== undefined && date !== null && dateRegex.test(date);
+}
+
+function isValidTime(time) {
+  return time !== undefined && time !== null && timeRegex.test(time);
 }
 
 async function requireAuth(req, res, next) {
@@ -333,8 +346,15 @@ app.get("/events/:id", async (req, res) => {
 app.post("/events", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
-    const { title, location, description, imageUrl, imageDeleteUrl, images } = req.body;
+    const { title, location, description, imageUrl, imageDeleteUrl, images, date, time } = req.body;
+
     if (!isNonEmptyString(title)) return res.status(400).json({ error: "title is required" });
+    if (date !== undefined && date !== null && !dateRegex.test(date)) {
+      return res.status(400).json({ error: "date format must be yyyy.mm.dd" });
+    }
+    if (time !== undefined && time !== null && !timeRegex.test(time)) {
+      return res.status(400).json({ error: "time format must be hh:mm (e.g. 16:30)" });
+    }
 
     const userDoc = await db.collection(USERS).doc(uid).get();
     const userData = userDoc.exists ? userDoc.data() : null;
@@ -345,6 +365,9 @@ app.post("/events", requireAuth, async (req, res) => {
     const ownerEmail = userData?.email || req.user?.email || null;
     const imagesData = Array.isArray(images) && images.length > 0 ? images : [];
 
+    const validDate = isValidDate(date) ? date : null;
+    const validTime = isValidTime(time) ? time : null;
+
     const docRef = await db.collection(EVENTS).add({
       title: title.trim(),
       location: isNonEmptyString(location) ? location.trim() : null,
@@ -352,6 +375,10 @@ app.post("/events", requireAuth, async (req, res) => {
       imageUrl: isNonEmptyString(imageUrl) ? imageUrl.trim() : (imagesData[0]?.url || null),
       imageDeleteUrl: isNonEmptyString(imageDeleteUrl) ? imageDeleteUrl.trim() : (imagesData[0]?.delete_url || null),
       images: imagesData,
+      date: validDate,
+      time: validTime,
+      // Kényelmi mező a frontendnek: "2026.04.13 16:30" vagy csak "2026.04.13" ha nincs idő
+      datetime: validDate ? (validTime ? `${validDate} ${validTime}` : validDate) : null,
       ownerUid: uid,
       ownerName,
       ownerEmail,
@@ -368,8 +395,15 @@ app.put("/events/:id", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
     const { id } = req.params;
-    const { title, location, description, images, imageUrl, imageDeleteUrl } = req.body;
+    const { title, location, description, images, imageUrl, imageDeleteUrl, date, time } = req.body;
+
     if (!isNonEmptyString(title)) return res.status(400).json({ error: "Hibás kérés: title kötelező" });
+    if (date !== undefined && date !== null && !dateRegex.test(date)) {
+      return res.status(400).json({ error: "date format must be yyyy.mm.dd" });
+    }
+    if (time !== undefined && time !== null && !timeRegex.test(time)) {
+      return res.status(400).json({ error: "time format must be hh:mm (e.g. 16:30)" });
+    }
 
     const ref = db.collection(EVENTS).doc(id);
     const docSnap = await ref.get();
@@ -377,6 +411,9 @@ app.put("/events/:id", requireAuth, async (req, res) => {
     if (docSnap.data().ownerUid !== uid) return res.status(403).json({ error: "Nem a te eseményed" });
 
     const imagesData = Array.isArray(images) ? images : [];
+    const validDate = isValidDate(date) ? date : null;
+    const validTime = isValidTime(time) ? time : null;
+
     await ref.update({
       title: title.trim(),
       location: isNonEmptyString(location) ? location.trim() : null,
@@ -384,6 +421,10 @@ app.put("/events/:id", requireAuth, async (req, res) => {
       imageUrl: isNonEmptyString(imageUrl) ? imageUrl.trim() : (imagesData[0]?.url || null),
       imageDeleteUrl: isNonEmptyString(imageDeleteUrl) ? imageDeleteUrl.trim() : (imagesData[0]?.delete_url || null),
       images: imagesData,
+      date: validDate,
+      time: validTime,
+      // Kényelmi mező a frontendnek: "2026.04.13 16:30" vagy csak "2026.04.13" ha nincs idő
+      datetime: validDate ? (validTime ? `${validDate} ${validTime}` : validDate) : null,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
