@@ -5,9 +5,15 @@ import fs from "node:fs";
 import dotenv from "dotenv";
 import multer from "multer";
 import axios from "axios";
+import { v2 as cloudinary } from 'cloudinary'; 
 
 dotenv.config();
 
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
 let serviceAccount;
 
 try {
@@ -42,7 +48,7 @@ const db = admin.firestore();
 const auth = admin.auth();
 
 const app = express();
-
+app.use(express.json({ limit: "10mb" }));
 app.use(cors({
   origin: [
     "http://localhost:3000",
@@ -172,14 +178,43 @@ app.post("/users/register", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-
 app.put("/users/me", requireAuth, async (req, res) => {
   try {
     const { uid } = req.user;
-    const { name } = req.body;
-    if (!isNonEmptyString(name)) return res.status(400).json({ error: "name is required" });
-    await db.collection(USERS).doc(uid).update({ name: name.trim(), updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-    await auth.updateUser(uid, { displayName: name.trim() });
+    const { name, photoURL } = req.body; // Kiterjesztve a photoURL-el
+
+    // Összeállítjuk a frissítendő adatokat a Firestore-hoz
+    const updates = { 
+      updatedAt: admin.firestore.FieldValue.serverTimestamp() 
+    };
+
+    // Összeállítjuk a frissítendő adatokat a Firebase Auth-hoz
+    const authUpdates = {};
+
+    if (isNonEmptyString(name)) {
+      updates.name = name.trim();
+      authUpdates.displayName = name.trim();
+    }
+
+    // Ha érkezett photoURL, hozzáadjuk a frissítéshez
+    if (isNonEmptyString(photoURL)) {
+      updates.photoURL = photoURL.trim();
+      authUpdates.photoURL = photoURL.trim();
+    }
+
+    // Ha nincs mit frissíteni, hibát dobunk (vagy csak simán visszatérünk)
+    if (Object.keys(updates).length <= 1) {
+      return res.status(400).json({ error: "Nincs megadva módosítandó adat (név vagy fotó)" });
+    }
+
+    // 1. Frissítés a Firestore adatbázisban
+    await db.collection(USERS).doc(uid).update(updates);
+
+    // 2. Frissítés a Firebase Authentication-ben
+    if (Object.keys(authUpdates).length > 0) {
+      await auth.updateUser(uid, authUpdates);
+    }
+
     res.status(200).json({ ok: true, msg: "Sikeres módosítás" });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -455,6 +490,164 @@ app.delete("/events/:id", requireAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+
+// ── Segédfüggvény: csak admin mehet tovább ────────────────────────────────────
+async function requireAdmin(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "Missing token" });
+  try {
+    req.user = await auth.verifyIdToken(token);
+    const userDoc = await db.collection(USERS).doc(req.user.uid).get();
+    if (!userDoc.exists || !userDoc.data().isAdmin) {
+      return res.status(403).json({ error: "Admin jogosultság szükséges" });
+    }
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: "Invalid token", details: e.message });
+  }
+}
+
+// ── GET /admin/stats ──────────────────────────────────────────────────────────
+app.get("/admin/stats", requireAdmin, async (req, res) => {
+  try {
+    const [usersSnap, eventsSnap, regsSnap] = await Promise.all([
+      db.collection(USERS).get(),
+      db.collection(EVENTS).orderBy("createdAt", "desc").limit(10).get(),
+      db.collection(REGISTRATIONS).get(),
+    ]);
+
+    const recentEvents = eventsSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+
+    res.status(200).json({
+      totalUsers: usersSnap.size,
+      totalEvents: (await db.collection(EVENTS).get()).size,
+      totalRegistrations: regsSnap.size,
+      recentEvents,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /admin/users ──────────────────────────────────────────────────────────
+app.get("/admin/users", requireAdmin, async (req, res) => {
+  try {
+    const snap = await db.collection(USERS).orderBy("name").get();
+    const users = snap.docs.map((doc) => ({ uid: doc.id, ...doc.data() }));
+    res.status(200).json({ count: users.length, users });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PUT /admin/users/:uid ─────────────────────────────────────────────────────
+// Body: { name?, isAdmin? }
+app.put("/admin/users/:uid", requireAdmin, async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { name, isAdmin } = req.body;
+
+    const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    if (isNonEmptyString(name)) {
+      updates.name = name.trim();
+      await auth.updateUser(uid, { displayName: name.trim() });
+    }
+    if (typeof isAdmin === "boolean") {
+      updates.isAdmin = isAdmin;
+    }
+
+    await db.collection(USERS).doc(uid).update(updates);
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── DELETE /admin/users/:uid ──────────────────────────────────────────────────
+// Törli a usert + összes eseményét (képekkel) + regisztrációit
+app.delete("/admin/users/:uid", requireAdmin, async (req, res) => {
+  try {
+    const { uid } = req.params;
+
+    // 1. Saját események lekérése
+    const eventsSnap = await db.collection(EVENTS).where("ownerUid", "==", uid).get();
+
+    // 2. Minden esemény regisztrációinak törlése + az esemény törlése
+    await Promise.all(
+      eventsSnap.docs.map(async (evDoc) => {
+        const eventId = evDoc.id;
+        // regisztrációk törlése
+        const regSnap = await db.collection(REGISTRATIONS).where("eventId", "==", eventId).get();
+        const batch = db.batch();
+        regSnap.docs.forEach((r) => batch.delete(r.ref));
+        batch.delete(evDoc.ref);
+        await batch.commit();
+      })
+    );
+
+    // 3. A userhez tartozó regisztrációk törlése (más eseményekre)
+    const userRegsSnap = await db.collection(REGISTRATIONS).where("uid", "==", uid).get();
+    if (!userRegsSnap.empty) {
+      const batch = db.batch();
+      userRegsSnap.docs.forEach((r) => batch.delete(r.ref));
+      await batch.commit();
+    }
+
+    // 4. Firestore user doc törlése
+    await db.collection(USERS).doc(uid).delete();
+
+    // 5. Firebase Auth fiók törlése
+    try {
+      await auth.deleteUser(uid);
+    } catch (authErr) {
+      // Ha már nem létezik az auth-ban, nem baj
+      console.warn("Auth delete warning:", authErr.message);
+    }
+
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+//feltöltés végpont:
+app.post('/api/uploadProfile', requireAuth, async (req, resp) => {
+    try {
+        const { image } = req.body; // A Profile.jsx-ből base64 érkezik
+        if (!image) return resp.status(400).json({ error: "Nincs kép!" });
+
+        const uploadResponse = await cloudinary.uploader.upload(image, {
+            folder: "profile_pics"
+        });
+
+        resp.json({
+            url: uploadResponse.secure_url,
+            public_id: uploadResponse.public_id
+        });
+    } catch (error) {
+        console.error(error);
+        resp.status(500).json({ error: "Cloudinary feltöltési hiba!" });
+    }
+});
+
+
+//törlés végpont:
+app.post('/api/deleteImage', async (req, resp)=>{
+    try {
+        const {public_id} = req.body
+        console.log("public_id kliensoldalról: " + public_id)
+        const deleteResult = await cloudinary.uploader.destroy(public_id)
+        if(deleteResult.result=="ok") resp.json({serverMsg:"Image deleted successfully!"})
+        else resp.status(404).json({serverMsg:"Image not found or already deleted!"})
+    } catch (error) {
+        console.log(error)
+        resp.status(500).json({serverMsg:"Failed to delete image!"})
+    }
+
+})
 
 if (process.env.NODE_ENV !== "production") {
   app.listen(port, () => console.log("Server is listening on port: " + port));
