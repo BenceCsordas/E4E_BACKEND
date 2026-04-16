@@ -456,8 +456,125 @@ app.delete("/events/:id", requireAuth, async (req, res) => {
   }
 });
 
-if (process.env.NODE_ENV !== "production") {
-  app.listen(port, () => console.log("Server is listening on port: " + port));
+
+// ── Segédfüggvény: csak admin mehet tovább ────────────────────────────────────
+async function requireAdmin(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "Missing token" });
+  try {
+    req.user = await auth.verifyIdToken(token);
+    const userDoc = await db.collection(USERS).doc(req.user.uid).get();
+    if (!userDoc.exists || !userDoc.data().isAdmin) {
+      return res.status(403).json({ error: "Admin jogosultság szükséges" });
+    }
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: "Invalid token", details: e.message });
+  }
 }
+
+// ── GET /admin/stats ──────────────────────────────────────────────────────────
+app.get("/admin/stats", requireAdmin, async (req, res) => {
+  try {
+    const [usersSnap, eventsSnap, regsSnap] = await Promise.all([
+      db.collection(USERS).get(),
+      db.collection(EVENTS).orderBy("createdAt", "desc").limit(10).get(),
+      db.collection(REGISTRATIONS).get(),
+    ]);
+
+    const recentEvents = eventsSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+
+    res.status(200).json({
+      totalUsers: usersSnap.size,
+      totalEvents: (await db.collection(EVENTS).get()).size,
+      totalRegistrations: regsSnap.size,
+      recentEvents,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /admin/users ──────────────────────────────────────────────────────────
+app.get("/admin/users", requireAdmin, async (req, res) => {
+  try {
+    const snap = await db.collection(USERS).orderBy("name").get();
+    const users = snap.docs.map((doc) => ({ uid: doc.id, ...doc.data() }));
+    res.status(200).json({ count: users.length, users });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PUT /admin/users/:uid ─────────────────────────────────────────────────────
+// Body: { name?, isAdmin? }
+app.put("/admin/users/:uid", requireAdmin, async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { name, isAdmin } = req.body;
+
+    const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    if (isNonEmptyString(name)) {
+      updates.name = name.trim();
+      await auth.updateUser(uid, { displayName: name.trim() });
+    }
+    if (typeof isAdmin === "boolean") {
+      updates.isAdmin = isAdmin;
+    }
+
+    await db.collection(USERS).doc(uid).update(updates);
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── DELETE /admin/users/:uid ──────────────────────────────────────────────────
+// Törli a usert + összes eseményét (képekkel) + regisztrációit
+app.delete("/admin/users/:uid", requireAdmin, async (req, res) => {
+  try {
+    const { uid } = req.params;
+
+    // 1. Saját események lekérése
+    const eventsSnap = await db.collection(EVENTS).where("ownerUid", "==", uid).get();
+
+    // 2. Minden esemény regisztrációinak törlése + az esemény törlése
+    await Promise.all(
+      eventsSnap.docs.map(async (evDoc) => {
+        const eventId = evDoc.id;
+        // regisztrációk törlése
+        const regSnap = await db.collection(REGISTRATIONS).where("eventId", "==", eventId).get();
+        const batch = db.batch();
+        regSnap.docs.forEach((r) => batch.delete(r.ref));
+        batch.delete(evDoc.ref);
+        await batch.commit();
+      })
+    );
+
+    // 3. A userhez tartozó regisztrációk törlése (más eseményekre)
+    const userRegsSnap = await db.collection(REGISTRATIONS).where("uid", "==", uid).get();
+    if (!userRegsSnap.empty) {
+      const batch = db.batch();
+      userRegsSnap.docs.forEach((r) => batch.delete(r.ref));
+      await batch.commit();
+    }
+
+    // 4. Firestore user doc törlése
+    await db.collection(USERS).doc(uid).delete();
+
+    // 5. Firebase Auth fiók törlése
+    try {
+      await auth.deleteUser(uid);
+    } catch (authErr) {
+      // Ha már nem létezik az auth-ban, nem baj
+      console.warn("Auth delete warning:", authErr.message);
+    }
+
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 export default app;
