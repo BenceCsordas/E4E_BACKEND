@@ -612,6 +612,109 @@ app.delete("/admin/users/:uid", requireAdmin, async (req, res) => {
   }
 });
 
+// ── DELETE /admin/events/:id ──────────────────────────────────────────────────
+// Adminként bármilyen esemény törlése (és a hozzá tartozó regisztrációké)
+app.delete("/admin/events/:id", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const eventRef = db.collection(EVENTS).doc(id);
+    const eventSnap = await eventRef.get();
+
+    // 1. Ellenőrizzük, létezik-e az esemény
+    if (!eventSnap.exists) {
+      return res.status(404).json({ error: "A megadott esemény nem létezik" });
+    }
+
+    // 2. Kapcsolódó regisztrációk törlése batch-ben
+    const regSnap = await db.collection(REGISTRATIONS).where("eventId", "==", id).get();
+    const batch = db.batch();
+    
+    regSnap.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+
+    // 3. Magának az eseménynek a törlése (hozzáadjuk a batch-hez)
+    batch.delete(eventRef);
+
+    // 4. Tranzakció végrehajtása
+    await batch.commit();
+
+    res.status(200).json({ 
+      ok: true, 
+      msg: "Esemény és kapcsolódó regisztrációk sikeresen törölve (admin által)" 
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PUT /admin/events/:id ─────────────────────────────────────────────────────
+// Adminként bármilyen esemény módosítása
+app.put("/admin/events/:id", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      title, 
+      location, 
+      description, 
+      images, 
+      imageUrl, 
+      imageDeleteUrl, 
+      date, 
+      time 
+    } = req.body;
+
+    // 1. Alapvető validáció (Adminnál is kötelező a cím)
+    if (!isNonEmptyString(title)) {
+      return res.status(400).json({ error: "Hibás kérés: title kötelező" });
+    }
+
+    // 2. Formátum ellenőrzések (Regex)
+    if (date && !dateRegex.test(date)) {
+      return res.status(400).json({ error: "Hibás dátum formátum: yyyy.mm.dd szükséges" });
+    }
+    if (time && !timeRegex.test(time)) {
+      return res.status(400).json({ error: "Hibás idő formátum: hh:mm szükséges" });
+    }
+
+    const eventRef = db.collection(EVENTS).doc(id);
+    const docSnap = await eventRef.get();
+
+    // 3. Létezés ellenőrzése
+    if (!docSnap.exists) {
+      return res.status(404).json({ error: "A megadott esemény nem létezik" });
+    }
+
+    // Előkészítjük az adatokat
+    const imagesData = Array.isArray(images) ? images : [];
+    const validDate = isValidDate(date) ? date : null;
+    const validTime = isValidTime(time) ? time : null;
+
+    // 4. Módosítás végrehajtása
+    // (Itt nincs ownerUid ellenőrzés, mert a requireAdmin már lefutott)
+    await eventRef.update({
+      title: title.trim(),
+      location: isNonEmptyString(location) ? location.trim() : null,
+      description: isNonEmptyString(description) ? description.trim() : null,
+      imageUrl: isNonEmptyString(imageUrl) ? imageUrl.trim() : (imagesData[0]?.url || null),
+      imageDeleteUrl: isNonEmptyString(imageDeleteUrl) ? imageDeleteUrl.trim() : (imagesData[0]?.delete_url || null),
+      images: imagesData,
+      date: validDate,
+      time: validTime,
+      datetime: validDate ? (validTime ? `${validDate} ${validTime}` : validDate) : null,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      adminLastEdit: req.user.uid // Opcionális: nyomon követhető, melyik admin módosította utoljára
+    });
+
+    res.status(200).json({ 
+      ok: true, 
+      msg: "Esemény sikeresen módosítva az adminisztrátor által" 
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 //feltöltés végpont:
 app.post('/api/uploadProfile', requireAuth, async (req, resp) => {
